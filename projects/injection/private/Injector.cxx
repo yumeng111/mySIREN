@@ -114,8 +114,12 @@ void Injector::SetPrimaryProcess(std::shared_ptr<siren::injection::PrimaryInject
     try {
         vtx_dist = FindPrimaryVertexDistribution(primary);
     } catch(siren::utilities::AddProcessFailure const & e) {
-        std::cerr << e.what() << std::endl;
-        exit(0);
+        //change
+        //std::cerr << e.what() << std::endl;
+        //exit(0);
+        // No VertexPositionDistribution found; allow nullptr so that distributions
+        // which handle position internally (PrimaryExternalDistribution) work.
+        vtx_dist = nullptr;
     }
     primary_process = primary;
     primary_position_distribution = vtx_dist;

@@ -140,7 +140,6 @@ std::shared_ptr<distributions::SecondaryVertexPositionDistribution> Injector::Fi
 }
 
 void Injector::SetPrimaryProcess(std::shared_ptr<siren::injection::PrimaryInjectionProcess> primary) {
-<<<<<<< HEAD
     std::shared_ptr<distributions::VertexPositionDistribution> vtx_dist;
     try {
         vtx_dist = FindPrimaryVertexDistribution(primary);
@@ -152,9 +151,6 @@ void Injector::SetPrimaryProcess(std::shared_ptr<siren::injection::PrimaryInject
         // which handle position internally (PrimaryExternalDistribution) work.
         vtx_dist = nullptr;
     }
-=======
-    std::shared_ptr<distributions::VertexPositionDistribution> vtx_dist = FindPrimaryVertexDistribution(primary);
->>>>>>> origin/pr/s14-beam-decays
     primary_process = primary;
     primary_position_distribution = vtx_dist;
 }

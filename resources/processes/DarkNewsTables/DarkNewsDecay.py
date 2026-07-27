@@ -255,8 +255,7 @@ class PyDarkNewsDecay(DarkNewsDecay):
                     break
                 gamma_idx += 1
             if gamma_idx >= len(record.signature.secondary_types):
-                print("No gamma found in the list of secondaries!")
-                exit(0)
+                raise ValueError("no gamma found in the list of secondaries")
 
             Pgamma = np.array(record.secondary_momenta[gamma_idx])
             momenta = np.expand_dims(PN, 0), np.expand_dims(Pgamma, 0)
@@ -281,8 +280,7 @@ class PyDarkNewsDecay(DarkNewsDecay):
                 else:
                     nu_idx = idx
             if -1 in [lepminus_idx, lepplus_idx, nu_idx]:
-                print("Couldn't find two leptons and a neutrino in the final state!")
-                exit(0)
+                raise ValueError("could not find two leptons and a neutrino in the final state")
             Pnu = np.array(record.secondary_momenta[nu_idx])
             Plepminus = np.array(record.secondary_momenta[lepminus_idx])
             Plepplus = np.array(record.secondary_momenta[lepplus_idx])
@@ -293,18 +291,19 @@ class PyDarkNewsDecay(DarkNewsDecay):
                 np.expand_dims(Pnu, 0),
             )
         else:
-            print("%s is not a valid decay class type!" % type(self.dec_case))
-            exit(0)
-        return self.dec_case.differential_width(momenta)
+            raise ValueError("%s is not a valid decay class type" % type(self.dec_case))
+        ret = self.dec_case.differential_width(momenta)
+        if hasattr(ret, "item"):
+            ret = ret.item()
+        return ret
 
-    def TotalDecayWidth(self, arg1):
+    def TotalDecayWidthAllFinalStates(self, arg1):
         if isinstance(arg1, dataclasses.InteractionRecord):
             primary = arg1.signature.primary_type
         elif isinstance(arg1, dataclasses.Particle.ParticleType):
             primary = arg1
         else:
-            print("Incorrect function call to TotalDecayWidth!")
-            exit(0)
+            raise TypeError("TotalDecayWidthAllFinalStates expects an InteractionRecord or ParticleType")
         if int(primary) != self.dec_case.nu_parent:
             return 0
         if self.total_width is None:
@@ -314,11 +313,8 @@ class PyDarkNewsDecay(DarkNewsDecay):
             ):
                 # total width calculation requires evaluating an integral
                 if self.decay_integrator is None or self.decay_norm is None:
-                    # We need to initialize a new VEGAS integrator in DarkNews
-                    self.total_width, dec_norm, dec_integrator = self.dec_case.total_width(
-                        return_norm=True, return_dec=True
-                    )
-                    self.SetIntegratorAndNorm(dec_norm, dec_integrator)
+                    # total_width() integrates internally and returns the width.
+                    self.total_width = self.dec_case.total_width()
                 else:
                     self.total_width = (
                         self.decay_integrator["diff_decay_rate_0"].mean
@@ -326,9 +322,12 @@ class PyDarkNewsDecay(DarkNewsDecay):
                     )
             else:
                 self.total_width = self.dec_case.total_width()
-        return self.total_width
+        ret = self.total_width
+        if hasattr(ret, "item"):
+            ret = ret.item()
+        return ret
 
-    def TotalDecayWidthForFinalState(self, record):
+    def TotalDecayWidth(self, record):
         sig = self.GetPossibleSignatures()[0]
         if (
             (record.signature.primary_type != sig.primary_type)
@@ -345,37 +344,25 @@ class PyDarkNewsDecay(DarkNewsDecay):
         ):
             return 0
         ret = self.dec_case.total_width()
+        if hasattr(ret, "item"):
+            ret = ret.item()
         return ret
 
     def DensityVariables(self):
         if isinstance(self.dec_case, FermionSinglePhotonDecay):
-            return "cost"
+            return ["cost"]
         elif isinstance(self.dec_case, FermionDileptonDecay):
             if self.dec_case.vector_on_shell and self.dec_case.scalar_on_shell:
-                print("Can't have both the scalar and vector on shell")
-                exit(0)
+                raise ValueError("cannot have both the scalar and vector on shell")
             elif (self.dec_case.vector_on_shell and self.dec_case.scalar_off_shell) or (
                 self.dec_case.vector_off_shell and self.dec_case.scalar_on_shell
             ):
-                return "cost"
+                return ["cost"]
             elif self.dec_case.vector_off_shell and self.dec_case.scalar_off_shell:
-                return "t,u,c3,phi34"
+                return ["t", "u", "c3", "phi34"]
         else:
-            print("%s is not a valid decay class type!" % type(self.dec_case))
-            exit(0)
-        return ""
-
-    def GetPSSample(self, random):
-        # Make the PS weight CDF if that hasn't been done
-        if self.PS_weights_CDF is None:
-            self.PS_weights_CDF = np.cumsum(self.PS_weights)
-
-        # Random number to determine
-        x = random.Uniform(0, self.PS_weights_CDF[-1])
-
-        # find first instance of a CDF entry greater than x
-        PSidx = np.argmax(x - self.PS_weights_CDF <= 0)
-        return self.PS_samples[:, PSidx]
+            raise ValueError("%s is not a valid decay class type" % type(self.dec_case))
+        return []
 
     def GetPSSample(self, random):
         # Make the PS weight CDF if that hasn't been done
@@ -399,12 +386,11 @@ class PyDarkNewsDecay(DarkNewsDecay):
         if self.PS_samples is None or self.PS_weights is None:
             # We need to generate new PS samples
             if self.decay_integrator is None or self.decay_norm is None:
-                # We need to initialize a new VEGAS integrator in DarkNews
-                (self.PS_samples, PS_weights_dict), dec_norm, dec_integrator = self.dec_case.SamplePS(
-                    return_norm=True, return_dec=True
-                )
+                # SamplePS() builds its own VEGAS integrator and returns
+                # (samples, weights_dict); the sample pool cached on this
+                # instance is all later draws need.
+                self.PS_samples, PS_weights_dict = self.dec_case.SamplePS()
                 self.PS_weights = PS_weights_dict["diff_decay_rate_0"]
-                self.SetIntegratorAndNorm(dec_norm, dec_integrator)
             else:
                 # We already have an integrator, we just need new PS samples
                 self.PS_samples, PS_weights_dict = self.dec_case.SamplePS(
@@ -433,8 +419,7 @@ class PyDarkNewsDecay(DarkNewsDecay):
                     break
                 gamma_idx += 1
             if gamma_idx >= len(record.signature.secondary_types):
-                print("No gamma found in the list of secondaries!")
-                exit(0)
+                raise ValueError("no gamma found in the list of secondaries")
             nu_idx = 1 - gamma_idx
             secondaries[gamma_idx].four_momentum = np.squeeze(four_momenta["P_decay_photon"])
             secondaries[gamma_idx].mass = 0
@@ -461,10 +446,7 @@ class PyDarkNewsDecay(DarkNewsDecay):
                 else:
                     nu_idx = idx
             if -1 in [lepminus_idx, lepplus_idx, nu_idx]:
-                print([lepminus_idx, lepplus_idx, nu_idx])
-                print(record.signature.secondary_types)
-                print("Couldn't find two leptons and a neutrino in the final state!")
-                exit(0)
+                raise ValueError("could not find two leptons and a neutrino in the final state")
             secondaries[lepminus_idx].four_momentum = (
                 np.squeeze(four_momenta["P_decay_ell_minus"])
             )

@@ -7,9 +7,14 @@ from . import interactions as _interactions
 from . import distributions as _distributions
 from . import injection as _injection
 from . import Injector as _Injector_module
+from .Injector import _is_trampoline
+from ._validation import validate_reweighting_compatibility
 
 from typing import Tuple, List, Dict, Optional, Union, Callable
 from typing import TYPE_CHECKING
+import warnings
+
+import numpy as np
 
 if TYPE_CHECKING:
     import siren
@@ -25,12 +30,25 @@ Decay = _interactions.Decay
 DetectorModel = _detector.DetectorModel
 InteractionTree = _dataclasses.InteractionTree
 
+
 class Weighter:
     """
     A wrapper for the C++ Weighter class, handling event weight calculations.
+
+    Besides the pooled central-value weight (``__call__`` / ``event_weight``),
+    two factorized per-vertex quantities are exposed for a single chosen
+    injector: ``interaction_probabilities`` and ``survival_probabilities`` (see
+    those methods). Still finer per-vertex factors -- the individual generation
+    and physical probability terms -- are reachable through the bound
+    ``siren.injection.PrimaryProcessWeighter`` /
+    ``siren.injection.SecondaryProcessWeighter`` classes, which expose
+    ``InteractionProbability``, ``NormalizedPositionProbability``,
+    ``PhysicalProbability``, ``GenerationProbability`` and ``EventWeight`` per
+    interaction datum.
     """
 
-    def __init__(self, 
+    def __init__(self,
+        *args,
         injectors: Optional[List[_Injector]] = None,
         detector_model: Optional[DetectorModel] = None,
         primary_type: Optional[_dataclasses.ParticleType] = None,
@@ -38,18 +56,42 @@ class Weighter:
         primary_physical_distributions: Optional[List[_distributions.WeightableDistribution]] = None,
         secondary_interactions: Optional[Dict[_dataclasses.ParticleType, List[Union[_interactions.CrossSection, _interactions.Decay]]]] = None,
         secondary_physical_distributions: Optional[Dict[_dataclasses.ParticleType, List[_distributions.WeightableDistribution]]] = None,
+        primary_physical: Optional[List[_distributions.WeightableDistribution]] = None,
+        secondary_physical: Optional[Dict[_dataclasses.ParticleType, List[_distributions.WeightableDistribution]]] = None,
+        overrides: Optional[Dict[str, object]] = None,
     ):
         """
         Initialize the Weighter with interactions and physical processes.
 
+        Two calling conventions are supported.
+
+        Legacy keyword form::
+
+            Weighter(injectors=[...], detector_model=..., primary_type=...,
+                     primary_interactions=..., primary_physical_distributions=...,
+                     secondary_interactions=..., secondary_physical_distributions=...)
+
+        Spec form, positional injectors plus physical-side keywords, inheriting
+        detector/types/interactions from the injectors themselves::
+
+            Weighter(injector, primary_physical=[...], secondary_physical={...})
+
+        ``overrides`` (spec form only) is a dict of legacy field names
+        (``detector_model``, ``primary_type``, ``primary_interactions``,
+        ``secondary_interactions``) to override what would otherwise be
+        inherited from the injectors.
+
         Args:
-            injectors: List of injector objects.
+            injectors: List of injector objects (legacy keyword form).
             detector_model: The detector model.
             primary_type: The primary particle type.
             primary_interactions: Dictionary of primary particle interactions.
             primary_physical_distributions: List of primary physical distributions.
             secondary_interactions: Dictionary of secondary particle interactions.
             secondary_physical_distributions: Dictionary of secondary physical distributions.
+            primary_physical: Primary physical distributions (spec form).
+            secondary_physical: Secondary physical distributions (spec form).
+            overrides: Legacy-field overrides for the spec form.
 
         Note:
             All parameters are optional and can be set later using property setters.
@@ -67,6 +109,22 @@ class Weighter:
 
         self.__weighter = None
 
+        spec_injectors = self.__detect_spec_injectors(args, injectors)
+
+        if spec_injectors is not None:
+            self.__init_from_injectors(
+                spec_injectors, primary_physical, secondary_physical, overrides)
+            return
+
+        if len(args) == 1 and injectors is None:
+            # Legacy form with injectors passed positionally as a list.
+            injectors = args[0]
+        elif len(args) > 1:
+            raise TypeError(
+                "Weighter() accepts either legacy keyword arguments or "
+                "one-or-more positional Injector arguments, not {} "
+                "positional arguments".format(len(args)))
+
         if injectors is not None:
             self.injectors = injectors
         if detector_model is not None:
@@ -82,62 +140,59 @@ class Weighter:
         if secondary_physical_distributions is not None:
             self.__secondary_physical_distributions = secondary_physical_distributions
 
-    def __initialize_weighter(self):
+    @staticmethod
+    def __detect_spec_injectors(args, injectors_kwarg):
+        """Return the positional injectors list if this is the spec-form call.
+
+        Spec form is detected by one-or-more positional args that are each an
+        Injector (python wrapper or raw C++ engine), with no ``injectors=``
+        keyword given. A single positional list (the legacy form) is left for
+        the caller to handle.
         """
-        Initialize the internal C++ Weighter object.
+        if injectors_kwarg is not None:
+            return None
+        if len(args) == 0:
+            return None
+        if len(args) == 1 and isinstance(args[0], list):
+            return None
+        if all(isinstance(a, (_Injector, _PyInjector)) for a in args):
+            return list(args)
+        return None
 
-        This method creates the C++ Weighter object using the configured parameters.
-        It is called automatically when needed and should not be called directly.
+    def __init_from_injectors(self, injectors, primary_physical,
+                               secondary_physical, overrides):
+        """Populate fields by inheriting from the given injectors' processes."""
+        overrides = overrides or {}
 
-        Raises:
-            ValueError: If any required attributes are not set.
-        """
+        self.injectors = injectors
 
-        if self.__injectors is None:
-            raise ValueError("Injectors have not been set.")
-        if self.__detector_model is None:
-            raise ValueError("Detector model has not been set.")
-        if self.__primary_type is None:
-            raise ValueError("Primary type has not been set.")
-        if len(self.__primary_interactions) == 0:
-            raise ValueError("Primary interactions have not been set.")
-        if len(self.__primary_physical_distributions) == 0:
-            raise ValueError("Primary physical distributions have not been set.")
-    
-        injectors = [injector._Injector__injector if isinstance(injector, _PyInjector) else injector for injector in self.__injectors]
+        engine0 = injectors[0].engine if isinstance(injectors[0], _PyInjector) else injectors[0]
+        primary_proc = engine0.GetPrimaryProcess()
 
-        primary_type = self.primary_type
-        primary_interaction_collection = _interactions.InteractionCollection(
-            primary_type, self.primary_interactions
-        )
-        primary_process = _injection.PhysicalProcess(
-            primary_type, primary_interaction_collection
-        )
-        primary_process.distributions = self.primary_physical_distributions
+        self.__detector_model = overrides.get(
+            "detector_model",
+            injectors[0].detector_model if isinstance(injectors[0], _PyInjector)
+            else engine0.GetDetectorModel())
+        self.__primary_type = overrides.get(
+            "primary_type", primary_proc.primary_type)
+        self.__primary_interactions = overrides.get(
+            "primary_interactions",
+            list(primary_proc.interactions.GetCrossSections())
+            + list(primary_proc.interactions.GetDecays()))
 
-        secondary_interactions = self.secondary_interactions
-        secondary_physical_distributions = self.secondary_physical_distributions
+        secondary_interactions = overrides.get("secondary_interactions", None)
+        if secondary_interactions is None:
+            secondary_interactions = {}
+            for ptype, sproc in engine0.GetSecondaryProcessMap().items():
+                secondary_interactions[ptype] = (
+                    list(sproc.interactions.GetCrossSections())
+                    + list(sproc.interactions.GetDecays()))
+        self.__secondary_interactions = secondary_interactions
 
-        secondary_processes = []
-        for secondary_type, secondary_interactions in secondary_interactions.items():
-            secondary_interaction_collection = _interactions.InteractionCollection(
-                secondary_type, secondary_interactions
-            )
-            secondary_process = _injection.PhysicalProcess(
-                secondary_type, secondary_interaction_collection
-            )
-            if secondary_type in secondary_physical_distributions:
-                secondary_process.distributions = secondary_physical_distributions[secondary_type]
-            else:
-                secondary_process.distributions = []
-            secondary_processes.append(secondary_process)
-
-        self.__weighter = _Weighter(
-            injectors,
-            self.detector_model,
-            primary_process,
-            secondary_processes,
-        )
+        self.__primary_physical_distributions = (
+            list(primary_physical) if primary_physical is not None else [])
+        self.__secondary_physical_distributions = (
+            dict(secondary_physical) if secondary_physical is not None else {})
 
     @property
     def injectors(self) -> List[_Injector]:
@@ -160,7 +215,11 @@ class Weighter:
         Raises:
             ValueError: If the weighter has already been initialized.
             TypeError: If the input is not a list of Injector objects.
-            ValueError: If any of the injectors are not initialized.
+
+        Note:
+            A python Injector wrapper need not already have built its
+            underlying engine -- it is unwrapped via its ``engine`` property
+            (which builds it lazily) at weighter-initialize time.
         """
 
         if self.__weighter is not None:
@@ -169,8 +228,6 @@ class Weighter:
             raise TypeError("Injectors must be a list.")
         if not all(isinstance(injector, (_Injector, _PyInjector)) for injector in injectors):
             raise TypeError("All injectors must be of type Injector.")
-        if not all(injector._Injector__injector is not None for injector in injectors if isinstance(injector, _PyInjector)):
-            raise ValueError("All injectors must be initialized.")
         self.__injectors = injectors
 
     @property
@@ -308,3 +365,291 @@ class Weighter:
             float: The calculated event weight.
         """
         return self(interaction_tree)
+
+    def interaction_probabilities(self, interaction_tree: InteractionTree, i_inj: int = 0) -> List[float]:
+        """
+        Per-vertex physical interaction probability for one chosen injector.
+
+        Returns one value per interaction datum in ``interaction_tree`` (in tree
+        order): the probability that the primary interacts within injector
+        ``i_inj``'s injection bounds -- i.e. over the segment spanning that
+        injector's PrimaryInjectionBounds (or SecondaryInjectionBounds for
+        non-root vertices). This is the interaction-region segment only.
+
+        It is DISJOINT from ``survival_probabilities`` (below): survival covers
+        the pre-injection segment leading up to the injection region, while this
+        covers the injection region itself. The two are NOT complementary
+        probabilities of one another (they integrate the column density over
+        different, non-overlapping segments), so do not expect them to sum to 1.
+
+        Args:
+            interaction_tree: The interaction tree to evaluate.
+            i_inj: Index into this weighter's injector list (default 0).
+
+        Returns:
+            List[float]: One interaction probability per interaction datum.
+        """
+        if self.__weighter is None:
+            self.__initialize_weighter()
+        return list(self.__weighter.GetInteractionProbabilities(interaction_tree, i_inj))
+
+    def survival_probabilities(self, interaction_tree: InteractionTree, i_inj: int = 0) -> List[float]:
+        """
+        Per-vertex survival probability over the pre-injection segment.
+
+        Returns one value per interaction datum in ``interaction_tree`` (in tree
+        order): the probability that the primary survives (does not interact)
+        over the pre-injection segment, from ``primary_initial_position`` up to
+        the near edge of injector ``i_inj``'s injection region (the first element
+        of its PrimaryInjectionBounds / SecondaryInjectionBounds).
+
+        This segment is DISJOINT from the one measured by
+        ``interaction_probabilities``: survival covers everything before the
+        injection region, the interaction probability covers the injection region
+        itself. They are therefore not complementary probabilities and need not
+        sum to 1.
+
+        Args:
+            interaction_tree: The interaction tree to evaluate.
+            i_inj: Index into this weighter's injector list (default 0).
+
+        Returns:
+            List[float]: One survival probability per interaction datum.
+        """
+        if self.__weighter is None:
+            self.__initialize_weighter()
+        return list(self.__weighter.GetSurvivalProbabilities(interaction_tree, i_inj))
+
+    def save(self, filename: str):
+        """
+        Serialize the weighter to ``<filename>.siren_weighter``.
+
+        Phase space maps are archived with their processes. Configurations that
+        still cannot survive the round-trip -- Python trampoline-derived
+        interactions or distributions, and a Python injector's stopping
+        condition -- raise NotSerializableError instead.
+
+        Args:
+            filename: Base path; the ".siren_weighter" suffix is added.
+        """
+        from . import errors as _errors
+        if self.__weighter is None:
+            self.__initialize_weighter()
+        self._guard_serializable(_errors)
+        self.__weighter.SaveWeighter(filename)
+
+    def _guard_serializable(self, _errors):
+        """Collect configurations that cannot survive a save/load round-trip.
+
+        Phase space maps are archived. The weighter checks its own Python
+        trampoline models and defers to each Python injector's guard for its
+        remaining unsupported trampoline and stopping-condition state.
+        """
+        offenders = []
+        for injector in (self.__injectors or []):
+            if isinstance(injector, _PyInjector):
+                try:
+                    injector._guard_serializable(_errors)
+                except _errors.NotSerializableError as exc:
+                    offenders.extend("injector: " + o for o in exc.offenders)
+        for interaction in self.__primary_interactions:
+            if _is_trampoline(interaction):
+                offenders.append(
+                    "primary interaction {!r} is a Python subclass (not "
+                    "serializable)".format(type(interaction).__name__))
+        for dist in self.__primary_physical_distributions:
+            if _is_trampoline(dist):
+                offenders.append(
+                    "primary distribution {!r} is a Python subclass (not "
+                    "serializable)".format(type(dist).__name__))
+        for stype, interactions in self.__secondary_interactions.items():
+            for interaction in interactions:
+                if _is_trampoline(interaction):
+                    offenders.append(
+                        "secondary interaction {!r} for type {} is a Python "
+                        "subclass (not serializable)".format(
+                            type(interaction).__name__, str(stype)))
+        for stype, dists in self.__secondary_physical_distributions.items():
+            for dist in dists:
+                if _is_trampoline(dist):
+                    offenders.append(
+                        "secondary distribution {!r} for type {} is a Python "
+                        "subclass (not serializable)".format(
+                            type(dist).__name__, str(stype)))
+        if offenders:
+            raise _errors.NotSerializableError(
+                "this weighter cannot be saved without silently changing "
+                "physics on reload:\n  - " + "\n  - ".join(offenders),
+                offenders=offenders)
+
+    def load(self, filename: str):
+        """
+        Restore the weighter from ``<filename>.siren_weighter``.
+
+        Constructs the underlying C++ weighter via its ``(injectors, filename)``
+        constructor, which loads the detector model and physical processes from
+        the file. The detector / interactions / distributions therefore do NOT
+        need to be configured first (unlike a freshly built weighter). Only the
+        injectors are used -- to bind the weighter to your live injection
+        processes for the generation-probability cancellation; if they were not
+        set, the injectors serialized in the file are used instead.
+
+        Args:
+            filename: Base path; the ".siren_weighter" suffix is added.
+        """
+        if self.__injectors is not None:
+            injectors = [injector.engine if isinstance(injector, _PyInjector) else injector
+                         for injector in self.__injectors]
+        else:
+            injectors = []
+        self.__weighter = _Weighter(injectors, filename)
+        self.__detector_model = self.__weighter.GetDetectorModel()
+        primary_process = self.__weighter.GetPrimaryPhysicalProcess()
+        self.__primary_type = primary_process.primary_type
+        self.__primary_interactions = list(
+            primary_process.interactions.GetCrossSections()) + list(
+            primary_process.interactions.GetDecays())
+        self.__primary_physical_distributions = list(primary_process.distributions)
+        self.__secondary_interactions = {}
+        self.__secondary_physical_distributions = {}
+        for secondary_process in self.__weighter.GetSecondaryPhysicalProcesses():
+            stype = secondary_process.primary_type
+            self.__secondary_interactions[stype] = list(
+                secondary_process.interactions.GetCrossSections()) + list(
+                secondary_process.interactions.GetDecays())
+            self.__secondary_physical_distributions[stype] = list(
+                secondary_process.distributions)
+
+    def weight_all(self, events) -> "np.ndarray":
+        """
+        Calculate weights for a list of events.
+
+        Args:
+            events: A list of InteractionTree objects.
+
+        Returns:
+            numpy.ndarray: The calculated event weights.
+        """
+        return np.array([self(event) for event in events])
+
+    @property
+    def engine(self) -> _Weighter:
+        """The raw C++ _Weighter, building it via __initialize_weighter if needed."""
+        if self.__weighter is None:
+            self.__initialize_weighter()
+        return self.__weighter
+
+    def explain(self, interaction_tree: InteractionTree) -> "report.WeightBreakdown":
+        """Per-vertex decomposition of the event weight.
+
+        Returns a ``report.WeightBreakdown`` built from the engine's
+        ``EventWeightWithBreakdown``, giving each vertex's generation and
+        physical probability, channel densities, cancelled distributions, and
+        diagnostic flags. Useful for diagnosing inf/0/NaN weights.
+        """
+        from .report import WeightBreakdown
+        if self.__weighter is None:
+            self.__initialize_weighter()
+        return WeightBreakdown.from_engine(
+            self.engine.EventWeightWithBreakdown(interaction_tree))
+
+    def breakdown(self, interaction_tree: InteractionTree) -> "report.WeightBreakdown":
+        """Deprecated alias of explain().
+
+        Retained for backward compatibility; emits a DeprecationWarning and
+        returns the same ``report.WeightBreakdown`` as explain().
+        """
+        warnings.warn(
+            "Weighter.breakdown() is deprecated, use Weighter.explain() instead",
+            DeprecationWarning, stacklevel=2)
+        return self.explain(interaction_tree)
+
+    def __initialize_weighter(self):
+        return self.__do_initialize_weighter()
+
+    def __do_initialize_weighter(self):
+        if self.__injectors is None:
+            raise ValueError("Injectors have not been set.")
+        if self.__detector_model is None:
+            raise ValueError("Detector model has not been set.")
+        if self.__primary_type is None:
+            raise ValueError("Primary type has not been set.")
+        if len(self.__primary_interactions) == 0:
+            raise ValueError("Primary interactions have not been set.")
+        if len(self.__primary_physical_distributions) == 0:
+            raise ValueError("Primary physical distributions have not been set.")
+
+        injectors = [
+            injector.engine
+            if isinstance(injector, _PyInjector) else injector
+            for injector in self.__injectors
+        ]
+
+        primary_type = self.primary_type
+        primary_interaction_collection = _interactions.InteractionCollection(
+            primary_type, self.primary_interactions
+        )
+        primary_process = _injection.PhysicalProcess(
+            primary_type, primary_interaction_collection
+        )
+        primary_process.distributions = self.primary_physical_distributions
+
+        # Copy weighting mode from the injector's primary process
+        inj0_cpp = injectors[0]
+        if inj0_cpp is not None:
+            primary_process.weighting_mode = inj0_cpp.GetPrimaryProcess().GetWeightingMode()
+
+        # The downstream mode contributes implicit physical factors (most
+        # importantly the normalized position density), so compatibility can
+        # only be decided here, after the mode has been copied from the
+        # injector.  Every injector in a pooled weighter must cover the shared
+        # physical measure.
+        for injector in injectors:
+            validate_reweighting_compatibility(
+                injector.GetPrimaryProcess().distributions,
+                self.primary_physical_distributions,
+                compute_interaction_probability=(
+                    primary_process.weighting_mode
+                    .compute_interaction_probability
+                ),
+                compute_position_probability=(
+                    primary_process.weighting_mode
+                    .compute_position_probability
+                ),
+            )
+
+        self.__weighter_primary_phys = primary_process
+
+        secondary_interactions = self.secondary_interactions
+        secondary_physical_distributions = self.secondary_physical_distributions
+
+        # Copy weighting modes from injector's secondary processes
+        sec_modes = {}
+        if inj0_cpp is not None:
+            for ptype, proc in inj0_cpp.GetSecondaryProcessMap().items():
+                sec_modes[ptype] = proc.GetWeightingMode()
+
+        secondary_processes = []
+        self.__weighter_secondary_phys = {}
+        for secondary_type, sec_ints in secondary_interactions.items():
+            secondary_interaction_collection = _interactions.InteractionCollection(
+                secondary_type, sec_ints
+            )
+            secondary_process = _injection.PhysicalProcess(
+                secondary_type, secondary_interaction_collection
+            )
+            if secondary_type in secondary_physical_distributions:
+                secondary_process.distributions = secondary_physical_distributions[secondary_type]
+            else:
+                secondary_process.distributions = []
+            if secondary_type in sec_modes:
+                secondary_process.weighting_mode = sec_modes[secondary_type]
+            secondary_processes.append(secondary_process)
+            self.__weighter_secondary_phys[secondary_type] = secondary_process
+
+        self.__weighter = _Weighter(
+            injectors,
+            self.detector_model,
+            primary_process,
+            secondary_processes,
+        )

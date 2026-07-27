@@ -14,6 +14,7 @@
 #include "SIREN/dataclasses/ParticleMasses.h"
 
 #include "SIREN/math/Vector3D.h"
+#include "SIREN/math/Kinematics.h"
 
 #include "SIREN/utilities/Errors.h"
 #include "SIREN/utilities/Random.h"
@@ -29,7 +30,7 @@
 ///////////////////
 
 double lambda(double a, double b, double c){
-  return a*a + b*b + c*c - 2*a*b - 2*a*c - 2*b*c;
+  return siren::math::Kallen(a, b, c);
 }
 
 // Functions to get three body decay widths
@@ -244,7 +245,7 @@ bool HNLDecay::equal(Decay const & other) const {
                     x->mixing);
 }
 
-double HNLDecay::TotalDecayWidth(dataclasses::InteractionRecord const & record) const {
+double HNLDecay::TotalDecayWidthAllFinalStates(dataclasses::InteractionRecord const & record) const {
     return TotalDecayWidth(record.signature.primary_type);
 }
 
@@ -254,7 +255,7 @@ double HNLDecay::TotalDecayWidth(siren::dataclasses::ParticleType primary) const
   dataclasses::InteractionRecord record;
   for(auto signature : signatures) {
     record.signature = signature;
-    gamma_tot += TotalDecayWidthForFinalState(record);
+    gamma_tot += TotalDecayWidth(record);
   }
   return gamma_tot;
 }
@@ -269,7 +270,7 @@ double HNLDecay::CCMesonDecayWidth(dataclasses::InteractionRecord const & record
       proxyRecord.signature.secondary_types[0] == dataclasses::ParticleType::TauMinus) {
     for(auto meson : PlusChargedMesons) {
       proxyRecord.signature.secondary_types[1] = meson;
-      GammaMeson += TotalDecayWidthForFinalState(proxyRecord);
+      GammaMeson += TotalDecayWidth(proxyRecord);
     }
   }
   else if (proxyRecord.signature.secondary_types[0] == dataclasses::ParticleType::EPlus ||
@@ -277,7 +278,7 @@ double HNLDecay::CCMesonDecayWidth(dataclasses::InteractionRecord const & record
            proxyRecord.signature.secondary_types[0] == dataclasses::ParticleType::TauPlus) {
     for(auto meson : MinusChargedMesons) {
       proxyRecord.signature.secondary_types[1] = meson;
-      GammaMeson += TotalDecayWidthForFinalState(proxyRecord);
+      GammaMeson += TotalDecayWidth(proxyRecord);
     }
   }
   else {
@@ -297,12 +298,12 @@ double HNLDecay::NCMesonDecayWidth(dataclasses::InteractionRecord const & record
   double GammaMeson = 0;
   for(auto meson : NeutralMesons) {
     proxyRecord.signature.secondary_types[1] = meson;
-    GammaMeson += TotalDecayWidthForFinalState(proxyRecord);
+    GammaMeson += TotalDecayWidth(proxyRecord);
   }
   return GammaMeson;
 }
 
-double HNLDecay::TotalDecayWidthForFinalState(dataclasses::InteractionRecord const & record) const {
+double HNLDecay::TotalDecayWidth(dataclasses::InteractionRecord const & record) const {
 
   // All decay widths from 2007.03701
   // and 0901.3589
@@ -805,7 +806,7 @@ double HNLDecay::GetAlpha(dataclasses::ParticleType const & secondary) const {
 // Three body decays follow arXiv:1905.00284v2
 // TODO: update two-body decays to arXiv:1905.00284v2
 double HNLDecay::DifferentialDecayWidth(dataclasses::InteractionRecord const & record) const {
-    double DecayWidth = TotalDecayWidthForFinalState(record);
+    double DecayWidth = TotalDecayWidth(record);
     // Check for isotropic decay
     if (nature==ChiralNature::Majorana) {
       return DecayWidth/2.; // This factor of 2 is for the cosTheta phase space, not the majorana nature :-)
@@ -1078,7 +1079,7 @@ void HNLDecay::SampleFinalState(dataclasses::CrossSectionDistributionRecord & re
 
 double HNLDecay::FinalStateProbability(dataclasses::InteractionRecord const & record) const {
   double dd = DifferentialDecayWidth(record);
-  double td = TotalDecayWidthForFinalState(record);
+  double td = TotalDecayWidth(record);
   if (dd == 0) return 0.;
   else if (td == 0) return 0.;
   else return dd/td;
@@ -1297,4 +1298,3 @@ std::vector<double> HNLDecay::ThreeBodyPhaseSpaceProposalDistribution(double & m
 
 } // namespace interactions
 } // namespace siren
-

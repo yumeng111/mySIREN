@@ -54,6 +54,13 @@ def csv_vertex(tmp_path):
                  "10.0,0.5,1.0,2.0,3.0,4.0,5.0,6.0\n")
     return str(p)
 
+@pytest.fixture
+def csv_with_time(tmp_path):
+    """CSV with an initial-time column."""
+    p = tmp_path / "time.csv"
+    p.write_text("E,t0\n10.0,16.678\n")
+    return str(p)
+
 
 @pytest.fixture
 def csv_custom_params(tmp_path):
@@ -162,6 +169,24 @@ class TestPrimaryExternalDistributionSampling:
         assert record.interaction_vertex == pytest.approx([1.0, 2.0, 3.0])
         assert record.initial_position == pytest.approx([1.0, 2.0, 3.0])
 
+    def test_sample_sets_initial_time(self, distributions, dataclasses,
+                                      utilities, csv_with_time):
+        dist = distributions.PrimaryExternalDistribution(csv_with_time)
+        rand = utilities.SIREN_random()
+        record = dataclasses.PrimaryDistributionRecord(
+            dataclasses.ParticleType.NuMu)
+        dist.Sample(rand, None, None, record)
+        assert record.initial_time == pytest.approx(16.678)
+
+    def test_no_time_column_leaves_default(self, distributions, dataclasses,
+                                           utilities, csv_basic):
+        dist = distributions.PrimaryExternalDistribution(csv_basic)
+        rand = utilities.SIREN_random()
+        record = dataclasses.PrimaryDistributionRecord(
+            dataclasses.ParticleType.NuMu)
+        dist.Sample(rand, None, None, record)
+        assert record.initial_time == 0.0
+
 # ---------------------------------------------------------------------------
 # GenerationProbability
 # ---------------------------------------------------------------------------
@@ -186,6 +211,34 @@ class TestPrimaryExternalDistributionProbability:
         record = dataclasses.InteractionRecord()
         record.primary_momentum = [5.0, 0.0, 0.0, 0.0]
         assert dist.GenerationProbability(None, None, record) == 1.0
+
+    def test_unweighted_instance_ignores_weighted_cache(self, distributions,
+                                                        dataclasses):
+        """An unweighted instance reports its own flat density even on a record
+        that a weighted generator cached its biased density into.
+
+        The cache key "PrimaryExternalDistribution_gen_prob" is written only by
+        a weighted (sampling_weights) instance's Sample. Only a weighted
+        instance may read it back; an unweighted instance (e.g. a physical-side
+        copy) must ignore it and report 1, so the de-biasing factor survives the
+        weight ratio.
+        """
+        keys = ["E"]
+        data = [[10.0], [20.0], [30.0]]
+        weights = [1.0, 2.0, 3.0]
+        weighted = distributions.PrimaryExternalDistribution(
+            keys, data, weights)
+        unweighted = distributions.PrimaryExternalDistribution(keys, data)
+
+        record = dataclasses.InteractionRecord()
+        record.primary_momentum = [20.0, 0.0, 0.0, 0.0]
+        record.interaction_parameters = {
+            "PrimaryExternalDistribution_gen_prob": 0.75}
+
+        # The unweighted instance ignores the cache and reports its flat density.
+        assert unweighted.GenerationProbability(None, None, record) == 1.0
+        # The weighted instance (which owns the cache) reads the biased density.
+        assert weighted.GenerationProbability(None, None, record) == 0.75
 
 
 # ---------------------------------------------------------------------------

@@ -62,27 +62,32 @@ void SecondaryBoundedVertexDistribution::SampleVertex(std::shared_ptr<siren::uti
     siren::detector::Path path(detector_model, DetectorPosition(endcap_0), DetectorDirection(dir), max_length);
     path.ClipToOuterBounds();
 
-    // Check if fiducial volume is provided
+    // A fiducial volume declares the support: only rays whose forward segment
+    // crosses the volume can place a vertex, and the vertex is confined to
+    // the crossing. A ray that misses must fail the attempt -- silently
+    // falling back to the unrestricted path would sample vertices outside
+    // the declared support (dirt events for a detector-box volume) while
+    // GenerationProbability reports the in-volume density, breaking the
+    // sample/density closure contract.
     if(fiducial_volume) {
         std::vector<siren::geometry::Geometry::Intersection> fid_intersections = fiducial_volume->Intersections(endcap_0, dir);
-        // If the path intersects the fiducial volume, restrict position to that volume
-        if(!fid_intersections.empty()) {
-            // make sure the first intersection happens before the maximum generation length
-            // and the last intersection happens in front of the generation point
-            bool update_path = (fid_intersections.front().distance < max_length
-                    && fid_intersections.back().distance > 0);
-            if(update_path) {
-                siren::math::Vector3D first_point((fid_intersections.front().distance > 0) ? fid_intersections.front().position : endcap_0);
-                siren::math::Vector3D last_point((fid_intersections.back().distance < max_length) ? fid_intersections.back().position : endcap_1);
-                path.SetPoints(DetectorPosition(first_point), DetectorPosition(last_point));
-            }
+        bool crosses = !fid_intersections.empty()
+                && fid_intersections.front().distance < max_length
+                && fid_intersections.back().distance > 0;
+        if(!crosses) {
+            throw(siren::utilities::InjectionFailure(
+                siren::utilities::FailureReason::NoPathThroughVolume,
+                "Secondary ray does not cross the fiducial volume!"));
         }
+        siren::math::Vector3D first_point((fid_intersections.front().distance > 0) ? fid_intersections.front().position : endcap_0);
+        siren::math::Vector3D last_point((fid_intersections.back().distance < max_length) ? fid_intersections.back().position : endcap_1);
+        path.SetPoints(DetectorPosition(first_point), DetectorPosition(last_point));
     }
 
     std::vector<siren::dataclasses::ParticleType> targets(interactions->TargetTypes().begin(), interactions->TargetTypes().end());
 
     std::vector<double> total_cross_sections(targets.size(), 0.0);
-    double total_decay_length = interactions->TotalDecayLength(record.record);
+    double total_decay_length = interactions->TotalDecayLengthAllFinalStates(record.record);
     siren::dataclasses::InteractionRecord fake_record = record.record;
     for(unsigned int i=0; i<targets.size(); ++i) {
         siren::dataclasses::ParticleType const & target = targets[i];
@@ -95,7 +100,7 @@ void SecondaryBoundedVertexDistribution::SampleVertex(std::shared_ptr<siren::uti
 
     double total_interaction_depth = path.GetInteractionDepthInBounds(targets, total_cross_sections, total_decay_length);
     if(total_interaction_depth == 0) {
-        throw(siren::utilities::InjectionFailure("No available interactions along path!"));
+        throw(siren::utilities::InjectionFailure(siren::utilities::FailureReason::NoPathThroughVolume, "No path through the injection volume!"));
     }
 
     double traversed_interaction_depth;
@@ -126,21 +131,19 @@ double SecondaryBoundedVertexDistribution::GenerationProbability(std::shared_ptr
     siren::detector::Path path(detector_model, DetectorPosition(endcap_0), DetectorDirection(dir), max_length);
     path.ClipToOuterBounds();
 
-    // Check if fiducial volume is provided
+    // Mirror SampleVertex: a fiducial volume is the support, so a ray that
+    // misses it has zero density and a crossing ray is normalized over the
+    // crossing alone.
     if(fiducial_volume) {
         std::vector<siren::geometry::Geometry::Intersection> fid_intersections = fiducial_volume->Intersections(endcap_0, dir);
-        // If the path intersects the fiducial volume, restrict position to that volume
-        if(!fid_intersections.empty()) {
-            // make sure the first intersection happens before the maximum generation length
-            // and the last intersection happens in front of the generation point
-            bool update_path = (fid_intersections.front().distance < max_length
-                    && fid_intersections.back().distance > 0);
-            if(update_path) {
-                DetectorPosition first_point((fid_intersections.front().distance > 0) ? fid_intersections.front().position : endcap_0);
-                DetectorPosition last_point((fid_intersections.back().distance < max_length) ? fid_intersections.back().position : endcap_1);
-                path.SetPoints(first_point, last_point);
-            }
-        }
+        bool crosses = !fid_intersections.empty()
+                && fid_intersections.front().distance < max_length
+                && fid_intersections.back().distance > 0;
+        if(!crosses)
+            return 0.0;
+        DetectorPosition first_point((fid_intersections.front().distance > 0) ? fid_intersections.front().position : endcap_0);
+        DetectorPosition last_point((fid_intersections.back().distance < max_length) ? fid_intersections.back().position : endcap_1);
+        path.SetPoints(first_point, last_point);
     }
 
     if(not path.IsWithinBounds(DetectorPosition(vertex)))
@@ -150,7 +153,7 @@ double SecondaryBoundedVertexDistribution::GenerationProbability(std::shared_ptr
 
     std::vector<siren::dataclasses::ParticleType> targets(possible_targets.begin(), possible_targets.end());
     std::vector<double> total_cross_sections(targets.size(), 0.0);
-    double total_decay_length = interactions->TotalDecayLength(record);
+    double total_decay_length = interactions->TotalDecayLengthAllFinalStates(record);
     siren::dataclasses::InteractionRecord fake_record = record;
     for(unsigned int i=0; i<targets.size(); ++i) {
         siren::dataclasses::ParticleType const & target = targets[i];
@@ -205,21 +208,18 @@ std::tuple<siren::math::Vector3D, siren::math::Vector3D> SecondaryBoundedVertexD
     siren::detector::Path path(detector_model, DetectorPosition(endcap_0), DetectorDirection(dir), max_length);
     path.ClipToOuterBounds();
 
-    // Check if fiducial volume is provided
+    // Mirror SampleVertex: the bounds are the fiducial crossing, and a ray
+    // that misses the volume has none.
     if(fiducial_volume) {
         std::vector<siren::geometry::Geometry::Intersection> fid_intersections = fiducial_volume->Intersections(endcap_0, dir);
-        // If the path intersects the fiducial volume, restrict position to that volume
-        if(!fid_intersections.empty()) {
-            // make sure the first intersection happens before the maximum generation length
-            // and the last intersection happens in front of the generation point
-            bool update_path = (fid_intersections.front().distance < max_length
-                    && fid_intersections.back().distance > 0);
-            if(update_path) {
-                DetectorPosition first_point((fid_intersections.front().distance > 0) ? fid_intersections.front().position : endcap_0);
-                DetectorPosition last_point((fid_intersections.back().distance < max_length) ? fid_intersections.back().position : endcap_1);
-                path.SetPoints(first_point, last_point);
-            }
-        }
+        bool crosses = !fid_intersections.empty()
+                && fid_intersections.front().distance < max_length
+                && fid_intersections.back().distance > 0;
+        if(!crosses)
+            return std::tuple<siren::math::Vector3D, siren::math::Vector3D>(siren::math::Vector3D(0, 0, 0), siren::math::Vector3D(0, 0, 0));
+        DetectorPosition first_point((fid_intersections.front().distance > 0) ? fid_intersections.front().position : endcap_0);
+        DetectorPosition last_point((fid_intersections.back().distance < max_length) ? fid_intersections.back().position : endcap_1);
+        path.SetPoints(first_point, last_point);
     }
 
     if(not path.IsWithinBounds(DetectorPosition(vertex)))
@@ -232,17 +232,25 @@ bool SecondaryBoundedVertexDistribution::equal(WeightableDistribution const & ot
 
     if(!x)
         return false;
-    else
-        return (max_length == x->max_length);
+    bool same_fid = (!fiducial_volume && !x->fiducial_volume)
+        || (fiducial_volume && x->fiducial_volume && *fiducial_volume == *(x->fiducial_volume));
+    return max_length == x->max_length && same_fid;
 }
 
 bool SecondaryBoundedVertexDistribution::less(WeightableDistribution const & other) const {
     const SecondaryBoundedVertexDistribution* x = dynamic_cast<const SecondaryBoundedVertexDistribution*>(&other);
-    return
-        std::tie(max_length)
-        <
-        std::tie(x->max_length);
+    if(!x)
+        return false;
+    if(max_length != x->max_length)
+        return max_length < x->max_length;
+    bool has_fid = (fiducial_volume != nullptr);
+    bool other_has_fid = (x->fiducial_volume != nullptr);
+    if(has_fid != other_has_fid)
+        return has_fid < other_has_fid;
+    if(has_fid && other_has_fid)
+        return *fiducial_volume < *(x->fiducial_volume);
+    return false;
 }
 
 } // namespace distributions
-} // namespace sirenREN
+} // namespace siren

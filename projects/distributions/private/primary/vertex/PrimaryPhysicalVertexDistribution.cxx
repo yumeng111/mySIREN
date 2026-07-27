@@ -64,7 +64,7 @@ std::tuple<siren::math::Vector3D, siren::math::Vector3D> PrimaryPhysicalVertexDi
     siren::dataclasses::InteractionRecord fake_record;
     record.FinalizeAvailable(fake_record);
     std::vector<double> total_cross_sections(targets.size(), 0.0);
-    double total_decay_length = interactions->TotalDecayLength(fake_record);
+    double total_decay_length = interactions->TotalDecayLengthAllFinalStates(fake_record);
     for(unsigned int i=0; i<targets.size(); ++i) {
         siren::dataclasses::ParticleType const & target = targets[i];
         fake_record.signature.target_type = target;
@@ -76,7 +76,7 @@ std::tuple<siren::math::Vector3D, siren::math::Vector3D> PrimaryPhysicalVertexDi
 
     double total_interaction_depth = path.GetInteractionDepthInBounds(targets, total_cross_sections, total_decay_length);
     if(total_interaction_depth == 0) {
-        throw(siren::utilities::InjectionFailure("No available interactions along path!"));
+        throw(siren::utilities::InjectionFailure(siren::utilities::FailureReason::NoTargetsOnPath, "No interaction targets along path!"));
     }
 
     double traversed_interaction_depth;
@@ -112,7 +112,7 @@ double PrimaryPhysicalVertexDistribution::GenerationProbability(std::shared_ptr<
 
     std::vector<siren::dataclasses::ParticleType> targets(possible_targets.begin(), possible_targets.end());
     std::vector<double> total_cross_sections(targets.size(), 0.0);
-    double total_decay_length = interactions->TotalDecayLength(record);
+    double total_decay_length = interactions->TotalDecayLengthAllFinalStates(record);
     siren::dataclasses::InteractionRecord fake_record = record;
     for(unsigned int i=0; i<targets.size(); ++i) {
         siren::dataclasses::ParticleType const & target = targets[i];
@@ -144,6 +144,14 @@ double PrimaryPhysicalVertexDistribution::GenerationProbability(std::shared_ptr<
 }
 
 PrimaryPhysicalVertexDistribution::PrimaryPhysicalVertexDistribution() {}
+
+std::set<DistributionVariable> PrimaryPhysicalVertexDistribution::SetVariables() const {
+    return {DistributionVariable::InteractionVertex};
+}
+
+std::set<DistributionVariable> PrimaryPhysicalVertexDistribution::RequiredVariables() const {
+    return {DistributionVariable::InitialPosition, DistributionVariable::PrimaryDirection};
+}
 
 std::string PrimaryPhysicalVertexDistribution::Name() const {
     return "PrimaryPhysicalVertexDistribution";

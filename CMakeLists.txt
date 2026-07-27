@@ -34,6 +34,10 @@ option(SIREN_PYTHON_PACKAGE
 )
 option(SIREN_WITH_MARLEY "Enable MARLEY support if available" ON)
 option(SIREN_REQUIRE_MARLEY "Fail configure if MARLEY requested but not found" OFF)
+option(SIREN_WITH_PYTHIA8 "Enable Pythia8 support if available" OFF)
+option(SIREN_REQUIRE_PYTHIA8 "Fail configure if Pythia8 requested but not found" OFF)
+option(SIREN_WITH_HEPMC3 "Enable HepMC3 output support if available" ON)
+option(SIREN_REQUIRE_HEPMC3 "Fail configure if HepMC3 requested but not found" OFF)
 
 # include cmake dependencies
 include(GNUInstallDirs)
@@ -90,6 +94,35 @@ function(apply_siren_compile_options target)
             $<$<AND:$<COMPILE_LANG_AND_ID:CXX,GNU>,$<CONFIG:Release>>:-s>
             $<$<COMPILE_LANG_AND_ID:CXX,Clang>:-stdlib=libc++>
         )
+    endif()
+endfunction()
+
+# Helper: strip local symbols from a shared object after build, in non-Debug
+# configurations. Safe for both single- and multi-config generators:
+#   * Single-config (Make, Ninja): gates on CMAKE_BUILD_TYPE at configure time,
+#     because CMAKE_BUILD_TYPE is fixed.
+#   * Multi-config (Xcode, Visual Studio, Ninja Multi-Config): gates on
+#     $<CONFIG:Debug> at build time, because CMAKE_BUILD_TYPE is empty and
+#     the actual config is only known at build time. When the config is
+#     Debug, every generator expression evaluates to an empty string, the
+#     COMMAND tokens are all empty, and CMake skips the rule.
+# Skips silently if CMAKE_STRIP is not available on the host toolchain.
+function(siren_strip_module target)
+    if(NOT CMAKE_STRIP)
+        return()
+    endif()
+    get_property(_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_is_multi_config)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND $<$<NOT:$<CONFIG:Debug>>:${CMAKE_STRIP}>
+                    $<$<NOT:$<CONFIG:Debug>>:-x>
+                    $<$<NOT:$<CONFIG:Debug>>:$<TARGET_FILE:${target}>>
+            COMMAND_EXPAND_LISTS
+            COMMENT "Stripping local symbols from ${target} (release configs only)")
+    elseif(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_STRIP} -x $<TARGET_FILE:${target}>
+            COMMENT "Stripping local symbols from ${target}")
     endif()
 endfunction()
 
@@ -160,6 +193,11 @@ include(MARLEY)
 if(TARGET MARLEY)
     apply_siren_compile_options(MARLEY)
 endif()
+include(PYTHIA8)
+if(TARGET PYTHIA8)
+    apply_siren_compile_options(PYTHIA8)
+endif()
+include(HepMC3)
 
 # load macros for googletest
 include(testing)
@@ -174,11 +212,13 @@ add_subdirectory(projects/detector)
 add_subdirectory(projects/interactions)
 add_subdirectory(projects/distributions)
 add_subdirectory(projects/injection)
+add_subdirectory(projects/io)
 
 # define the target library
 add_library(SIREN SHARED)
 set_property(TARGET SIREN PROPERTY POSITION_INDEPENDENT_CODE ON)
 apply_siren_compile_options(SIREN)
+siren_strip_module(SIREN)
 
 if(DEFINED MACOSX AND MACOSX)
 if(CMAKE_VERSION VERSION_LESS 3.13)
@@ -199,6 +239,7 @@ target_link_libraries(SIREN
         SIREN_interactions
         SIREN_distributions
         SIREN_injection
+        SIREN_io
 )
 else()
 target_link_libraries(SIREN
@@ -214,6 +255,7 @@ target_link_libraries(SIREN
         SIREN_interactions
         SIREN_distributions
         SIREN_injection
+        SIREN_io
 )
 endif()
 
@@ -235,6 +277,7 @@ if(DEFINED SKBUILD_PLATLIB_DIR)
             SIREN_interactions
             SIREN_distributions
             SIREN_injection
+            SIREN_io
             EXPORT ${PROJECT_NAME}Config
             LIBRARY DESTINATION "${CI_INSTALL_PREFIX}/lib"
             PUBLIC_HEADER DESTINATION "${CI_INSTALL_PREFIX}/include")
@@ -249,6 +292,7 @@ if(DEFINED SKBUILD_PLATLIB_DIR)
             SIREN_interactions
             SIREN_distributions
             SIREN_injection
+            SIREN_io
             EXPORT ${PROJECT_NAME}Config
             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/siren.libs
             PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
@@ -264,6 +308,7 @@ else()
         SIREN_interactions
         SIREN_distributions
         SIREN_injection
+        SIREN_io
         EXPORT ${PROJECT_NAME}Config
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
@@ -312,6 +357,8 @@ if(DEFINED SKBUILD_PLATLIB_DIR)
     install(TARGETS distributions
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/siren)
     install(TARGETS injection
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/siren)
+    install(TARGETS hepmc3
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/siren)
     install(DIRECTORY ${PROJECT_SOURCE_DIR}/python/
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/siren)

@@ -2,11 +2,14 @@
 #ifndef SIREN_Distributions_H
 #define SIREN_Distributions_H
 
+#include <set>                                           // for set
 #include <string>                                        // for string
 #include <memory>                                        // for shared_ptr
 #include <cstdint>                                       // for uint32_t
 #include <stdexcept>                                     // for runtime_error
 #include <vector>                                        // for vector
+
+#include "SIREN/distributions/DistributionVariable.h"
 
 #include <cereal/access.hpp>
 #include <cereal/types/polymorphic.hpp>
@@ -79,6 +82,21 @@ friend cereal::access;
 public:
     virtual ~WeightableDistribution() {};
     virtual double GenerationProbability(std::shared_ptr<siren::detector::DetectorModel const> detector_model, std::shared_ptr<siren::interactions::InteractionCollection const> interactions, siren::dataclasses::InteractionRecord const & record) const = 0;
+    // Density this distribution contributes when it stands among a PHYSICAL
+    // process's distributions. For almost every distribution the physical
+    // density is the same function as the generation density, so the default
+    // forwards to GenerationProbability and the process weighter may cancel a
+    // value-equal injection/physical pair. A distribution whose two roles
+    // genuinely differ -- an external table whose rows are sampled uniformly
+    // (or by an explicit bias) while the rows represent importance-weighted
+    // physical parents -- overrides PhysicalDensity with the physical row
+    // density and returns true from PhysicalDensityDiffers so the pair is
+    // never cancelled. C++-side hook: Python-defined distributions always use
+    // the defaults.
+    virtual double PhysicalDensity(std::shared_ptr<siren::detector::DetectorModel const> detector_model, std::shared_ptr<siren::interactions::InteractionCollection const> interactions, siren::dataclasses::InteractionRecord const & record) const {
+        return GenerationProbability(detector_model, interactions, record);
+    }
+    virtual bool PhysicalDensityDiffers() const { return false; }
     virtual std::vector<std::string> DensityVariables() const;
     virtual std::string Name() const = 0;
     template<class Archive>
@@ -142,6 +160,8 @@ public:
     virtual ~PrimaryInjectionDistribution() {};
     virtual void Sample(std::shared_ptr<siren::utilities::SIREN_random> rand, std::shared_ptr<siren::detector::DetectorModel const> detector_model, std::shared_ptr<siren::interactions::InteractionCollection const> interactions, siren::dataclasses::PrimaryDistributionRecord & record) const = 0;
     virtual std::shared_ptr<PrimaryInjectionDistribution> clone() const = 0;
+    virtual std::set<DistributionVariable> SetVariables() const = 0;
+    virtual std::set<DistributionVariable> RequiredVariables() const;
     template<class Archive>
     void save(Archive & archive, std::uint32_t const version) const {
         if(version == 0) {

@@ -33,7 +33,9 @@ add_custom_command(
       interactions
       distributions
       injection
+      hepmc3
       "${CMAKE_CURRENT_BINARY_DIR}/.stamp_clean"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_STAGING_DIR}/siren"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:utilities>"
         "${PACKAGE_STAGING_DIR}/siren/"
@@ -59,6 +61,9 @@ add_custom_command(
         "$<TARGET_FILE:injection>"
         "${PACKAGE_STAGING_DIR}/siren/"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:hepmc3>"
+        "${PACKAGE_STAGING_DIR}/siren/"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:SIREN>"
         "${PACKAGE_STAGING_DIR}/siren/"
     COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/.stamp_copy_extensions
@@ -66,16 +71,20 @@ add_custom_command(
     VERBATIM
 )
 
-# Copy python files into the staging area
+# Copy python files into the staging area.
+#
+# Depend on EVERY file under python/, not a hardcoded subset: the copy command
+# stages the whole directory, so if the dependency list omits a file, editing
+# that file does not restage and `cmake --install` ships a stale copy. The glob
+# uses CONFIGURE_DEPENDS so that adding or removing a python file re-runs the
+# glob at build time (no manual reconfigure needed).
+file(GLOB_RECURSE PYTHON_PACKAGE_FILES LIST_DIRECTORIES false CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/python/*)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/.stamp_copy_python
     DEPENDS
         ${CMAKE_CURRENT_BINARY_DIR}/.stamp_clean
-        ${CMAKE_SOURCE_DIR}/python/Injector.py
-        ${CMAKE_SOURCE_DIR}/python/Weighter.py
-        ${CMAKE_SOURCE_DIR}/python/__init__.py
-        ${CMAKE_SOURCE_DIR}/python/_util.py
-        ${CMAKE_SOURCE_DIR}/python/resources.py
+        ${PYTHON_PACKAGE_FILES}
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/python
         ${PACKAGE_STAGING_DIR}/${PROJECT_NAME}
@@ -84,8 +93,10 @@ add_custom_command(
     VERBATIM
 )
 
-# Copy resources into the staging area
-file(GLOB_RECURSE RESOURCES_FILES ${CMAKE_SOURCE_DIR}/resources/*)
+# Copy resources into the staging area. CONFIGURE_DEPENDS re-runs the glob at
+# build time so added/removed resource files are picked up (and a stale glob
+# referencing a deleted file cannot break the build after a branch switch).
+file(GLOB_RECURSE RESOURCES_FILES LIST_DIRECTORIES false CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/resources/*)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/.stamp_copy_resources
     DEPENDS

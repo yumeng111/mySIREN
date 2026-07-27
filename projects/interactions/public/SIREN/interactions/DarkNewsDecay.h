@@ -39,9 +39,9 @@ public:
 
     virtual bool equal(Decay const & other) const override;
 
-    virtual double TotalDecayWidth(dataclasses::InteractionRecord const &) const override;
+    virtual double TotalDecayWidthAllFinalStates(dataclasses::InteractionRecord const &) const override;
     virtual double TotalDecayWidth(siren::dataclasses::ParticleType primary) const override;
-    virtual double TotalDecayWidthForFinalState(dataclasses::InteractionRecord const &) const override;
+    virtual double TotalDecayWidth(dataclasses::InteractionRecord const &) const override;
     virtual double DifferentialDecayWidth(dataclasses::InteractionRecord const &) const override;
     virtual void SampleRecordFromDarkNews(dataclasses::CrossSectionDistributionRecord &, std::shared_ptr<siren::utilities::SIREN_random>) const;
     virtual void SampleFinalState(dataclasses::CrossSectionDistributionRecord &, std::shared_ptr<siren::utilities::SIREN_random>) const override;
@@ -61,7 +61,7 @@ public:
         }
     }
     template<typename Archive>
-    void load_and_construct(Archive & archive, cereal::construct<DarkNewsDecay> & construct, std::uint32_t version) {
+    static void load_and_construct(Archive & archive, cereal::construct<DarkNewsDecay> & construct, std::uint32_t version) {
         if(version == 0) {
             archive(::cereal::make_nvp("Decay", cereal::virtual_base_class<Decay>(construct.ptr())));
         } else {

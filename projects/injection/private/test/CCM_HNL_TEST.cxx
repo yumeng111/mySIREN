@@ -37,6 +37,8 @@
 #include "SIREN/interactions/HNLDipoleDecay.h"
 #include "SIREN/interactions/Decay.h"
 
+#include "CCM_HNL_Fixture.h"
+
 using namespace siren::math;
 using namespace siren::geometry;
 using namespace siren::detector;
@@ -163,6 +165,9 @@ TEST(Injector, Generation)
 {
     using ParticleType = ParticleType;
 
+    if(!siren::injection::test::CCMHNLDataPresent()) {
+        GTEST_SKIP() << "CCM_HNL data files are not present in this environment";
+    }
 
     // Load the detector model
     std::shared_ptr<DetectorModel> detector_model = std::make_shared<DetectorModel>();
@@ -258,8 +263,8 @@ TEST(Injector, Generation)
 
     // Primary position distribution: treat targets as point sources, generate from center
     double max_dist = 25; // m
-    std::shared_ptr<VertexPositionDistribution> upper_pos_dist = std::make_shared<PointSourcePositionDistribution>(upper_target_origin, max_dist, primary_interactions->TargetTypes());
-    std::shared_ptr<VertexPositionDistribution> lower_pos_dist = std::make_shared<PointSourcePositionDistribution>(lower_target_origin, max_dist, primary_interactions->TargetTypes());
+    std::shared_ptr<VertexPositionDistribution> upper_pos_dist = std::make_shared<PointSourcePositionDistribution>(upper_target_origin, max_dist);
+    std::shared_ptr<VertexPositionDistribution> lower_pos_dist = std::make_shared<PointSourcePositionDistribution>(lower_target_origin, max_dist);
     primary_injection_process_upper_injector->AddPrimaryInjectionDistribution(upper_pos_dist);
     primary_injection_process_lower_injector->AddPrimaryInjectionDistribution(lower_pos_dist);
     //primary_physical_process_upper_injector->AddPhysicalDistribution(upper_pos_dist);
@@ -294,9 +299,9 @@ TEST(Injector, Generation)
     std::shared_ptr<Injector> lower_injector = std::make_shared<Injector>(events_to_inject, detector_model, primary_injection_process_lower_injector, secondary_injection_processes, random);
 
     // Set stopping condition
-    std::function<bool(std::shared_ptr<siren::dataclasses::InteractionTreeDatum>, size_t)> stopping_condition =
-      [&] (std::shared_ptr<siren::dataclasses::InteractionTreeDatum> datum, size_t i) {
-        if(datum->depth() >=1) return true;
+    std::function<bool(siren::dataclasses::InteractionTree const &, std::shared_ptr<siren::dataclasses::InteractionTreeDatum>, size_t)> stopping_condition =
+      [&] (siren::dataclasses::InteractionTree const & tree, std::shared_ptr<siren::dataclasses::InteractionTreeDatum> datum, size_t i) {
+        if(datum->depth(tree) >=1) return true;
         return false;
     };
     upper_injector->SetStoppingCondition(stopping_condition);
@@ -345,6 +350,32 @@ TEST(Injector, Generation)
         //std::cout << "Weight: " << weight << std::endl;
         ++i;
     }
+}
+
+// EventWeightWithBreakdown().total must equal EventWeight() for every
+// generated tree, across the full upper-injector CCM dipole-HNL chain.
+TEST(Injector, BreakdownInvariant)
+{
+    if(!siren::injection::test::CCMHNLDataPresent()) {
+        GTEST_SKIP() << "CCM_HNL data files are not present in this environment";
+    }
+    siren::injection::test::CCMHNLFixture fixture = siren::injection::test::MakeCCMHNLFixture();
+
+    unsigned int checked = 0;
+    // Bound on attempts, not accepted events, so GenerateEvent is never called
+    // once the attempt budget is spent (which would throw).
+    while(fixture.injector->InjectionAttempts() < fixture.injector->EventsToInject()
+          && checked < 10) {
+        InteractionTree tree = fixture.injector->GenerateEvent();
+        if(tree.tree.empty()) continue;
+
+        double weight = fixture.weighter->EventWeight(tree);
+        EventWeightBreakdown breakdown = fixture.weighter->EventWeightWithBreakdown(tree);
+
+        EXPECT_NEAR(breakdown.total, weight, 1e-12 * std::max(1.0, std::abs(weight)));
+        ++checked;
+    }
+    EXPECT_GT(checked, 0u) << "no accepted trees to check the breakdown invariant on";
 }
 
 int main(int argc, char** argv)

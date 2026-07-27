@@ -3,6 +3,7 @@
 #define SIREN_Weighter_H
 
 #include <map>                                           // for map
+#include <string>                                        // for string
 #include <tuple>
 #include <memory>                                        // for shared_ptr
 #include <vector>                                        // for vector
@@ -21,6 +22,7 @@
 
 #include "SIREN/dataclasses/InteractionTree.h"  // for InteractionT...
 #include "SIREN/dataclasses/Particle.h"         // for Particle
+#include "SIREN/dataclasses/PhaseSpaceConvention.h"
 
 namespace siren { namespace dataclasses { class InteractionRecord; } }
 namespace siren { namespace detector { class DetectorModel; } }
@@ -44,9 +46,22 @@ private:
     std::shared_ptr<ProcessType> inj_process;
     std::vector<std::shared_ptr<typename ProcessType::InjectionType>> unique_gen_distributions;
     std::vector<std::shared_ptr<siren::distributions::WeightableDistribution>> unique_phys_distributions;
+    // Names of the injection/physical distributions that matched by operator==
+    // and were removed from both unique_* sets because they cancel in the weight
+    // ratio. Observation-only; recorded once at Initialize().
+    std::vector<std::string> cancelled_distribution_names;
     std::shared_ptr<siren::detector::DetectorModel> detector_model;
     std::vector<std::shared_ptr<typename ProcessType::InjectionType>> const & GetInjectionDistributions();
     void Initialize();
+    siren::dataclasses::PhaseSpaceConvention WeightingConvention(
+        siren::dataclasses::InteractionRecord const & record) const;
+    double PhysicalProbability(
+        std::tuple<siren::math::Vector3D, siren::math::Vector3D> const & bounds,
+        siren::dataclasses::InteractionRecord const & record,
+        siren::dataclasses::PhaseSpaceConvention const & convention) const;
+    double GenerationProbability(
+        siren::dataclasses::InteractionTreeDatum const & datum,
+        siren::dataclasses::PhaseSpaceConvention const & convention) const;
     double normalization;
 public:
     double InteractionProbability(std::tuple<siren::math::Vector3D, siren::math::Vector3D> const & bounds, siren::dataclasses::InteractionRecord const & record) const;
@@ -55,6 +70,8 @@ public:
     double PhysicalProbability(std::tuple<siren::math::Vector3D, siren::math::Vector3D> const & bounds, siren::dataclasses::InteractionRecord const & record) const;
     double GenerationProbability(siren::dataclasses::InteractionTreeDatum const & datum) const;
     double EventWeight(std::tuple<siren::math::Vector3D, siren::math::Vector3D> const & bounds, siren::dataclasses::InteractionTreeDatum const & datum) const;
+    std::vector<std::string> const & GetCancelledDistributionNames() const { return cancelled_distribution_names; }
+    std::shared_ptr<ProcessType> GetInjectionProcess() const { return inj_process; }
     ProcessWeighter(std::shared_ptr<siren::injection::PhysicalProcess> phys_process, std::shared_ptr<ProcessType> inj_process, std::shared_ptr<siren::detector::DetectorModel> detector_model);
 
 }; // ProcessWeighter
@@ -62,10 +79,46 @@ public:
 typedef ProcessWeighter<siren::injection::PrimaryInjectionProcess> PrimaryProcessWeighter;
 typedef ProcessWeighter<siren::injection::SecondaryInjectionProcess> SecondaryProcessWeighter;
 
+// One tree vertex's weight factors, recorded for diagnostics. generation and
+// physical are the exact per-datum factors the event weight consumes; the other
+// fields are observation-only and never fed back into the weight.
+struct VertexWeightFactors {
+    int injector_index = 0;
+    int depth = 0;
+    // pdg of the particle at this vertex, not the event's primary.
+    int vertex_pdg = 0;
+    double generation = 1.0;
+    double physical = 1.0;
+    double interaction_prob = 1.0;
+    double position_prob = 1.0;
+    // Convention shared by every value in channel_densities, stored here as
+    // separate topology/measure fields rather than a single
+    // PhaseSpaceConvention.
+    siren::dataclasses::PhaseSpaceTopology channel_density_topology =
+        siren::dataclasses::PhaseSpaceTopology::Unspecified;
+    siren::dataclasses::PhaseSpaceMeasure channel_density_measure =
+        siren::dataclasses::PhaseSpaceMeasure::Unspecified();
+    std::map<std::string, double> channel_densities;
+    std::vector<std::string> cancelled;
+    std::vector<std::string> flags;
+};
+
+// Per-vertex decomposition of an event weight. total equals
+// Weighter::EventWeight(tree): a zero-generation vertex (the path EventWeight
+// throws on) is flagged and yields a NaN total, while a zero-physical vertex is
+// flagged and yields a 0.0 total, matching EventWeight's zero-weight case.
+struct EventWeightBreakdown {
+    double total = 0.0;
+    std::vector<VertexWeightFactors> vertices;
+};
+
 // Parent class for calculating event weights
 // Assumes there is a unique secondary physical process for each particle type
 class Weighter {
 private:
+    // Empty weighter for LoadWeighter's temp-and-swap; a failed parse never mutates the live weighter.
+    Weighter() = default;
+
     // Supplied by constructor
     std::vector<std::shared_ptr<Injector>> injectors;
     std::shared_ptr<siren::detector::DetectorModel> detector_model;
@@ -82,8 +135,19 @@ private:
     > secondary_process_weighter_maps;
 
     void Initialize();
+    // with_diagnostics fills the observation-only interaction_prob/position_prob
+    // fields; EventWeight leaves it false so it computes only the physical and
+    // generation factors it consumes.
+    VertexWeightFactors ComputeVertexFactors(unsigned int idx,
+        std::shared_ptr<siren::dataclasses::InteractionTreeDatum> const & datum,
+        bool with_diagnostics = false) const;
 public:
     double EventWeight(siren::dataclasses::InteractionTree const & tree) const;
+    EventWeightBreakdown EventWeightWithBreakdown(siren::dataclasses::InteractionTree const & tree) const;
+    std::vector<std::shared_ptr<Injector>> const & GetInjectors() const;
+    std::shared_ptr<siren::detector::DetectorModel> GetDetectorModel() const;
+    std::shared_ptr<siren::injection::PhysicalProcess> GetPrimaryPhysicalProcess() const;
+    std::vector<std::shared_ptr<siren::injection::PhysicalProcess>> const & GetSecondaryPhysicalProcesses() const;
     std::vector<double> GetInteractionProbabilities(siren::dataclasses::InteractionTree const & tree, int i_inj = 0) const;
     std::vector<double> GetSurvivalProbabilities(siren::dataclasses::InteractionTree const & tree, int i_inj = 0) const;
     Weighter(std::vector<std::shared_ptr<Injector>> injectors, std::shared_ptr<siren::detector::DetectorModel> detector_model, std::shared_ptr<siren::injection::PhysicalProcess> primary_physical_process, std::vector<std::shared_ptr<siren::injection::PhysicalProcess>> secondary_physical_processes);
@@ -94,6 +158,18 @@ public:
 
     template<typename Archive>
     void save(Archive & archive, std::uint32_t const version) const {
+        if(version == 0) {
+            archive(::cereal::make_nvp("Injectors", injectors));
+            archive(::cereal::make_nvp("DetectorModel", detector_model));
+            archive(::cereal::make_nvp("PrimaryPhysicalProcess", primary_physical_process));
+            archive(::cereal::make_nvp("SecondaryPhysicalProcesses", secondary_physical_processes));
+        } else {
+            throw std::runtime_error("Weighter only supports version <= 0!");
+        }
+    }
+
+    template<typename Archive>
+    void load(Archive & archive, std::uint32_t const version) {
         if(version == 0) {
             archive(::cereal::make_nvp("Injectors", injectors));
             archive(::cereal::make_nvp("DetectorModel", detector_model));

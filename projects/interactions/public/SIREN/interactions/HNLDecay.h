@@ -83,9 +83,9 @@ public:
     virtual bool equal(Decay const & other) const override;
     double GetHNLMass() const {return hnl_mass;};
     // if only one coupling provided, assume it is U4t
-    virtual double TotalDecayWidth(dataclasses::InteractionRecord const &) const override;
+    virtual double TotalDecayWidthAllFinalStates(dataclasses::InteractionRecord const &) const override;
     virtual double TotalDecayWidth(siren::dataclasses::ParticleType primary) const override;
-    virtual double TotalDecayWidthForFinalState(dataclasses::InteractionRecord const &) const override;
+    virtual double TotalDecayWidth(dataclasses::InteractionRecord const &) const override;
     virtual double DifferentialDecayWidth(dataclasses::InteractionRecord const &) const override;
     virtual void SampleFinalState(dataclasses::CrossSectionDistributionRecord &, std::shared_ptr<siren::utilities::SIREN_random>) const override;
     virtual std::vector<siren::dataclasses::InteractionSignature> GetPossibleSignatures() const override;
@@ -117,7 +117,7 @@ public:
         }
     }
     template<typename Archive>
-    void load_and_construct(Archive & archive, cereal::construct<HNLDecay> & construct, std::uint32_t version) {
+    static void load_and_construct(Archive & archive, cereal::construct<HNLDecay> & construct, std::uint32_t version) {
         if(version == 0) {
             std::set<siren::dataclasses::ParticleType> _primary_types;
             double _hnl_mass;
@@ -129,6 +129,10 @@ public:
             archive(::cereal::make_nvp("HNLMass", _hnl_mass));
             archive(::cereal::make_nvp("Mixing", _mixing));
             archive(::cereal::make_nvp("ChiralNature", _nature_int));
+            if(_nature_int != static_cast<int>(Dirac) && _nature_int != static_cast<int>(Majorana)) {
+                throw std::runtime_error("HNLDecay: invalid ChiralNature value "
+                    + std::to_string(_nature_int) + " in archive");
+            }
             _nature = static_cast<ChiralNature>(_nature_int);
             construct(_hnl_mass, _mixing, _nature, _primary_types);
             archive(::cereal::make_nvp("Decay", cereal::virtual_base_class<Decay>(construct.ptr())));
